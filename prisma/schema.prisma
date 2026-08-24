@@ -1,0 +1,490 @@
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ==================== ENUMS ====================
+
+enum UserRole {
+  SUPER_ADMIN // Главный администратор системы
+  OPS_MANAGER // Операционный диспетчер (рейсы, гейты)
+  SECURITY_OFFICER // Служба авиационной безопасности
+  TECHNICIAN // Технический специалист / инженер
+  PARTNER_ADMIN // Администратор партнёра (прокат, услуги)
+  PASSENGER // Пассажир / клиент
+}
+
+enum SeatStatus {
+  AVAILABLE
+  RESERVED
+  PREPARATION
+  READY
+  ASSIGNED
+  INSTALLED
+  ACTIVE_RENTAL
+  RETURNED
+  CLEANING
+  INSPECTION
+  QUARANTINE
+  RETIRED
+}
+
+enum BookingStatus {
+  NEW
+  ALLOCATED
+  PREPARATION
+  READY
+  TECHNICIAN_ASSIGNED
+  EN_ROUTE
+  INSTALLED
+  FAMILY_READY
+  ACTIVE_RENTAL
+  RETURNED
+  CLEANING
+  INSPECTION
+  CANCELLED
+  COMPLETED
+}
+
+enum SeatCategory {
+  INFANT_CARRIER // Автолюлька (0/0+)
+  INFANT // Стандартное младенческое кресло
+  TODDLER // Кресло для малышей (Группа 1)
+  BOOSTER // Бустер (Группа 2/3)
+  STROLLER_LIGHT // Лёгкая коляска-трость
+  STROLLER_RECON // Тяжёлая прогулочная коляска
+}
+
+enum ChildAgeBand {
+  NEWBORN_0_3M // Новорожденные (0–3 месяца)
+  INFANT_0_1 // Младенцы (0–1 год)
+  TODDLER_1_4 // Малыши (1–4 года)
+  CHILD_4_12 // Дети (4–12 лет)
+}
+
+enum CleaningStep {
+  INITIAL_INSPECTION
+  CLEANING
+  DRYING
+  REASSEMBLY
+  FINAL_INSPECTION
+}
+
+enum InspectionStep {
+  INITIAL
+  FINAL
+}
+
+enum IncidentStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+enum PaymentStatus {
+  UNPAID
+  PAID
+  OVERDUE
+}
+
+enum FlightStatusEnum {
+  SCHEDULED
+  DELAYED
+  EARLY
+  LANDED
+  CANCELLED
+  DIVERTED
+}
+
+enum ScanType {
+  INTERNAL
+  PUBLIC
+}
+
+enum AdjustmentType {
+  REFUND
+  CHARGEBACK
+  MANUAL_ADJUSTMENT
+  CANCELLATION_FEE
+}
+
+// ==================== MODELS ====================
+
+model UserProfile {
+  id        String   @id @default(uuid())
+  userId    String   @unique // ID из Supabase Auth
+  role      UserRole
+  partnerId String?
+  partner   Partner? @relation(fields: [partnerId], references: [id])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  bookings              Booking[]              @relation("AssignedBookings")
+  technicianAssignments TechnicianAssignment[]
+}
+
+model Partner {
+  id             String                @id @default(uuid())
+  name           String
+  settings       PartnerSettings?
+  users          UserProfile[]
+  bookings       Booking[]
+  seats          Seat[]
+  invoices       Invoice[]
+  settlements    Settlement[]
+  flightStatuses FlightStatus[]
+  incidents      Incident[]
+  roiInput       PartnerRoiInput?
+  adjustments    FinancialAdjustment[]
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+}
+
+model PartnerSettings {
+  id                  String   @id @default(uuid())
+  partnerId           String   @unique
+  partner             Partner  @relation(fields: [partnerId], references: [id])
+  defaultPartnerShare Decimal  @default(0.30) @db.Decimal(5, 2)
+  launchEnabled       Boolean  @default(false)
+  launchPartnerShare  Decimal  @default(0.50) @db.Decimal(5, 2)
+  launchCreditTarget  Decimal  @default(0) @db.Decimal(10, 2)
+  launchCreditAccrued Decimal  @default(0) @db.Decimal(10, 2)
+  onboardingCredit    Decimal  @default(0) @db.Decimal(10, 2)
+  annualProgramFee    Decimal  @default(0) @db.Decimal(10, 2)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}
+
+model PartnerRoiInput {
+  id                        String   @id @default(uuid())
+  partnerId                 String   @unique
+  partner                   Partner  @relation(fields: [partnerId], references: [id])
+  seatPurchaseCost          Decimal? @db.Decimal(10, 2)
+  cleaningCost              Decimal? @db.Decimal(10, 2)
+  storageCost               Decimal? @db.Decimal(10, 2)
+  staffHandlingMinutes      Int?
+  hourlyEmployeeCost        Decimal? @db.Decimal(10, 2)
+  annualReplacementCost     Decimal? @db.Decimal(10, 2)
+  refunds                   Decimal? @db.Decimal(10, 2)
+  compensation              Decimal? @db.Decimal(10, 2)
+  childSeatPrice            Decimal? @db.Decimal(10, 2)
+  familyBookingConversion   Decimal? @db.Decimal(5, 2)
+  vehicleRentalContribution Decimal? @db.Decimal(10, 2)
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+}
+
+model Booking {
+  id                    String        @id @default(uuid())
+  partnerId             String
+  partner               Partner       @relation(fields: [partnerId], references: [id])
+  externalBookingNumber String?
+  locationAirport       String // например, DXB
+  pickupDateTime        DateTime
+  returnDateTime        DateTime
+  flightNumber          String?
+  // Денормализованные поля рейса (синхронизируются с FlightStatus)
+  scheduledArrival      DateTime?
+  estimatedArrival      DateTime?
+  actualArrival         DateTime?
+  seatCategory          SeatCategory
+  childAgeBand          ChildAgeBand?
+  childHeight           String?
+  vehicle               String?
+  vehicleBay            String?
+  assignedSeatId        String? // БЕЗ @unique — одно кресло участвует во многих бронированиях
+  assignedSeat          Seat?         @relation(fields: [assignedSeatId], references: [id])
+  assignedTechnicianId  String?
+  assignedTechnician    UserProfile?  @relation("AssignedBookings", fields: [assignedTechnicianId], references: [id])
+  dailyRate             Decimal       @default(0) @db.Decimal(10, 2)
+  paidDays              Int           @default(0)
+  grossRevenue          Decimal       @default(0) @db.Decimal(10, 2)
+  partnerShare          Decimal       @default(0) @db.Decimal(10, 2)
+  platformShare         Decimal       @default(0) @db.Decimal(10, 2)
+  status                BookingStatus @default(NEW)
+  incidentStatus        String?
+  notes                 String?
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+
+  statusHistory         BookingStatusHistory[]
+  technicianAssignments TechnicianAssignment[]
+  seatScans             SeatScanLog[]
+  cleaningLogs          CleaningLog[]
+  inspectionLogs        InspectionLog[]
+  flightStatus          FlightStatus?
+  settlements           Settlement[]
+  adjustments           FinancialAdjustment[]
+  incidents             Incident[]
+
+  @@index([partnerId, status])
+  @@index([partnerId, pickupDateTime])
+}
+
+model BookingStatusHistory {
+  id        String        @id @default(uuid())
+  bookingId String
+  booking   Booking       @relation(fields: [bookingId], references: [id])
+  status    BookingStatus
+  changedBy String // userId
+  notes     String?
+  createdAt DateTime      @default(now())
+}
+
+model Seat {
+  id                  String       @id @default(uuid())
+  publicToken         String       @unique // постоянный публичный токен
+  qrCodeData          String? // короткая ссылка для QR
+  manufacturer        String?
+  model               String?
+  category            SeatCategory
+  safetyCertification String?
+  manufactureDate     DateTime?
+  purchaseDate        DateTime?
+  currentLocation     String?
+  warehousePosition   String?
+  status              SeatStatus   @default(AVAILABLE)
+  rentalCycles        Int          @default(0)
+  maxRentalCycles     Int?
+  lastCleaningDate    DateTime?
+  lastInspectionDate  DateTime?
+  partnerId           String
+  partner             Partner      @relation(fields: [partnerId], references: [id])
+  retirementStatus    Boolean      @default(false)
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+
+  statusHistory     SeatStatusHistory[]
+  cleaningLogs      CleaningLog[]
+  inspectionLogs    InspectionLog[]
+  seatScans         SeatScanLog[]
+  damageRecords     DamageRecord[]
+  quarantineRecords QuarantineRecord[]
+  bookings          Booking[] // обратная связь от Booking.assignedSeatId
+
+  @@index([partnerId, status])
+  @@index([publicToken])
+}
+
+model SeatStatusHistory {
+  id        String     @id @default(uuid())
+  seatId    String
+  seat      Seat       @relation(fields: [seatId], references: [id])
+  status    SeatStatus
+  changedBy String
+  notes     String?
+  createdAt DateTime   @default(now())
+}
+
+model CleaningLog {
+  id         String       @id @default(uuid())
+  seatId     String
+  seat       Seat         @relation(fields: [seatId], references: [id])
+  bookingId  String?
+  booking    Booking?     @relation(fields: [bookingId], references: [id])
+  employeeId String
+  step       CleaningStep
+  checklist  Json?
+  passed     Boolean
+  notes      String?
+  photoUrl   String?
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+}
+
+model InspectionLog {
+  id         String         @id @default(uuid())
+  seatId     String
+  seat       Seat           @relation(fields: [seatId], references: [id])
+  bookingId  String?
+  booking    Booking?       @relation(fields: [bookingId], references: [id])
+  employeeId String
+  step       InspectionStep
+  checklist  Json?
+  passed     Boolean
+  notes      String?
+  photoUrl   String?
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+}
+
+model DamageRecord {
+  id          String    @id @default(uuid())
+  seatId      String
+  seat        Seat      @relation(fields: [seatId], references: [id])
+  description String
+  reportedBy  String
+  reportedAt  DateTime  @default(now())
+  resolved    Boolean   @default(false)
+  resolvedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+model QuarantineRecord {
+  id        String    @id @default(uuid())
+  seatId    String
+  seat      Seat      @relation(fields: [seatId], references: [id])
+  reason    String
+  startDate DateTime  @default(now())
+  endDate   DateTime?
+  notes     String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+}
+
+model TechnicianAssignment {
+  id           String      @id @default(uuid())
+  bookingId    String
+  booking      Booking     @relation(fields: [bookingId], references: [id])
+  technicianId String
+  technician   UserProfile @relation(fields: [technicianId], references: [id])
+  status       String      @default("PENDING") // PENDING, IN_PROGRESS, COMPLETED
+  assignedAt   DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  installation InstallationRecord?
+}
+
+model InstallationRecord {
+  id            String               @id @default(uuid())
+  assignmentId  String               @unique
+  assignment    TechnicianAssignment @relation(fields: [assignmentId], references: [id])
+  checklist     Json?
+  photoUrl      String?
+  vehicleBay    String?
+  completedAt   DateTime?
+  familyReadyAt DateTime?
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
+}
+
+model SeatScanLog {
+  id        String   @id @default(uuid())
+  seatId    String
+  seat      Seat     @relation(fields: [seatId], references: [id])
+  scannedBy String // userId или 'public'
+  scanType  ScanType
+  bookingId String?
+  booking   Booking? @relation(fields: [bookingId], references: [id])
+  result    String?
+  createdAt DateTime @default(now())
+}
+
+model FlightStatus {
+  id               String           @id @default(uuid())
+  flightNumber     String
+  scheduledArrival DateTime
+  estimatedArrival DateTime?
+  actualArrival    DateTime?
+  delayMinutes     Int              @default(0)
+  earlyMinutes     Int              @default(0)
+  status           FlightStatusEnum @default(SCHEDULED)
+  terminal         String?
+  bookingId        String?          @unique
+  booking          Booking?         @relation(fields: [bookingId], references: [id])
+  partnerId        String
+  partner          Partner          @relation(fields: [partnerId], references: [id])
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  @@index([partnerId, estimatedArrival, scheduledArrival])
+}
+
+model Invoice {
+  id            String        @id @default(uuid())
+  partnerId     String
+  partner       Partner       @relation(fields: [partnerId], references: [id])
+  invoiceNumber String
+  periodStart   DateTime
+  periodEnd     DateTime
+  subtotal      Decimal       @default(0) @db.Decimal(10, 2)
+  vatRate       Decimal       @default(0) @db.Decimal(5, 2)
+  vatAmount     Decimal       @default(0) @db.Decimal(10, 2)
+  total         Decimal       @default(0) @db.Decimal(10, 2)
+  dueDate       DateTime
+  status        PaymentStatus @default(UNPAID)
+  pdfUrl        String?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  settlements Settlement[]
+}
+
+model Settlement {
+  id                    String   @id @default(uuid())
+  partnerId             String
+  partner               Partner  @relation(fields: [partnerId], references: [id])
+  bookingId             String
+  booking               Booking  @relation(fields: [bookingId], references: [id])
+  invoiceId             String?
+  invoice               Invoice? @relation(fields: [invoiceId], references: [id])
+  grossRevenue          Decimal  @default(0) @db.Decimal(10, 2)
+  partnerShare          Decimal  @default(0) @db.Decimal(10, 2)
+  platformShare         Decimal  @default(0) @db.Decimal(10, 2)
+  launchCreditUsed      Decimal  @default(0) @db.Decimal(10, 2)
+  launchCreditRemaining Decimal  @default(0) @db.Decimal(10, 2)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+}
+
+model FinancialAdjustment {
+  id        String         @id @default(uuid())
+  partnerId String
+  partner   Partner        @relation(fields: [partnerId], references: [id])
+  bookingId String?
+  booking   Booking?       @relation(fields: [bookingId], references: [id])
+  type      AdjustmentType
+  amount    Decimal        @db.Decimal(10, 2)
+  reason    String?
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+}
+
+model Incident {
+  id          String         @id @default(uuid())
+  partnerId   String
+  partner     Partner        @relation(fields: [partnerId], references: [id])
+  bookingId   String?
+  booking     Booking?       @relation(fields: [bookingId], references: [id])
+  description String
+  severity    String?
+  status      IncidentStatus @default(OPEN)
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  tableName String
+  recordId  String
+  action    String // INSERT, UPDATE, DELETE
+  oldData   Json?
+  newData   Json?
+  changedBy String?
+  ipAddress String? // доп. поле для безопасности
+  userAgent String? // доп. поле для логирования
+  createdAt DateTime @default(now())
+}
+
+model PartnerLog {
+  id        String   @id @default(uuid())
+  partnerId String
+  message   String
+  createdAt DateTime @default(now())
+}
+
+model AiQueryLog {
+  id        String   @id @default(uuid())
+  partnerId String
+  question  String
+  answer    Json?
+  createdAt DateTime @default(now())
+}
